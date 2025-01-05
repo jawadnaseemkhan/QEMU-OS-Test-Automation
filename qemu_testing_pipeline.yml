@@ -1,0 +1,168 @@
+nightly_test:
+  stage: test
+  image: git-registry.swf.i.mercedes-benz.com/apricot/apricot-subsystem-richos-prep/$IMAGE_NAME:$IMAGE_TAG
+  variables:
+    IMAGE_TAG: "0.0.115"
+    IMAGE_NAME_SUFFIX: "-stable"
+    IMAGE_NAME: "yocto-environment-richos-prep${IMAGE_NAME_SUFFIX}"
+    ARTIFACT_SOURCE: "mbient/teams/ADK/Qemu/build/unofficial-adk/i3_nightly"
+    ARTIFACTORY_UPLOAD_URL: "mbient/teams/ADK/Qemu/build/unofficial-adk/automation_test_result/"
+    SSH_HOST: "localhost"
+    SSH_PORT: "5555"
+    SSH_USER: "root"
+    DISPLAY: ":99"  
+
+  script:
+
+
+    - echo "Step 1 = Updating packages and installing dependencies"
+    - sudo apt-get update && sudo apt-get install -y curl build-essential libglib2.0-dev libpixman-1-dev zlib1g-dev pkg-config libicu-dev qt5-qmake qtbase5-dev qtwebengine5-dev qtchooser qtbase5-dev-tools librrd-dev x11-apps imagemagick xvfb x11vnc qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils
+  
+    - echo "Step 2 = Downloading QEMU 9.1.0"
+    - 'curl -L -o qemu-9.1.0.tar.xz https://download.qemu.org/qemu-9.1.0.tar.xz'
+
+    - echo "Step 3 = Extracting QEMU 9.1.0"
+    - tar -xf qemu-9.1.0.tar.xz
+
+    - echo "Step 4 = Configuring and Installing QEMU 9.1.0"
+    - cd qemu-9.1.0 && ./configure --target-list=x86_64-softmmu && make -j$(nproc) && sudo make install && cd ..
+
+    - echo "Step 5 = Starting Xvfb (virtual display)"
+    - Xvfb :99 -screen 0 1024x768x16 &
+    - export DISPLAY=:99 
+
+    - echo "Step 6 = Configuring Git"
+    - git config --global user.email "gitlabciuser.pool-id@mercedes-benz.com"
+    - git config --global user.name "GitlabCIUser"
+
+    - echo "Step 7 = Cloning the verification-robotframework repository (ADK branch)"
+    - git clone --branch ADK --single-branch https://$TE_GITLAB_USER:$TE_GITLAB_TOKEN@git.swf.i.mercedes-benz.com/swf/verification-robotframework.git
+    - cd verification-robotframework
+    - echo "Current branch:"
+    - git branch
+    - cd Resources/ADK
+
+    - echo "Step 8 = Checking for JFrog CLI"
+    - 'JF=$(type -p jf) || (echo "Jfrog client not found" ; exit 1)'
+
+    - echo "Step 9 = Configuring JFrog CLI"
+    - jf c add --interactive=false --url=https://${ARTIFACTORY_REGISTRY}/ --user="$ARTIFACTORY_CI_USER" --password="$ARTIFACTORY_CI_APIKEY"
+    - $JF rt ping
+
+    - echo "Step 10 = Creating images directory"
+    - mkdir images
+
+    - echo "Step 11 = Downloading artifacts from Artifactory"
+    - $JF rt dl --include-dirs "${ARTIFACT_SOURCE}/" images/
+    - ls -salh images
+
+    - echo "Step 12 = Navigating to the correct directory for the downloaded image"
+    - cd images/teams/ADK/Qemu/build/unofficial-adk/i3_nightly/
+
+    - echo "Step 13 = Extracting downloaded image"
+    - gunzip mbient-image-adk-qemux86-64-cranberry.rootfs.img.gz
+
+    - echo "Step 14 = Showing complete path of bzImage and extracted image"
+    - ls -salh $(pwd)/bzImage
+    - ls -salh $(pwd)/mbient-image-adk-qemux86-64-cranberry.rootfs.img
+
+    - echo "Step 15 = Installing Robot Framework dependencies"
+    - pip install robotframework rpaframework robotframework-seleniumlibrary uiautomator uiautomator2 pyperclip robotframework-sshlibrary || exit 1
+    - pwd
+    - cd ../../../../../../../../../
+    - pwd
+    - 'pip install --only-binary=:all: -r requirements/requirements.txt --no-binary autoapi'
+    - export PATH=$PATH:/home/yoctouser/.local/bin
+    - cd Resources/ADK/images/teams/ADK/Qemu/build/unofficial-adk/i3_nightly
+
+    - echo "Step 16 = Checking for KVM support..."
+    - if [ -e /dev/kvm ]; then echo "KVM is available"; else echo "KVM not available"; export USE_TCG=true; fi
+    - sudo kvm-ok || echo "KVM cannot be used, switching to TCG"
+
+    - echo "Step 17 = Creating and running QEMU script"
+    - |
+      RUNNER_IP=$(hostname -I | awk '{print $1}')
+      cat << 'EOF' > run_qemu.sh
+      #!/bin/bash
+      KERNEL_PATH=$(pwd)/bzImage
+      ROOTFS_PATH=$(pwd)/mbient-image-adk-qemux86-64-cranberry.rootfs.img
+      MEMORY_SIZE="8192"
+      CPU_CORES="4"
+      NETWORK_PORT="5555"
+      echo "Starting QEMU with kernel: $KERNEL_PATH and rootfs: $ROOTFS_PATH"
+
+      # Serial console for debugging
+      qemu-system-x86_64 \
+        -serial mon:stdio \
+        -nodefaults \
+        -name "Automation Testing" \
+        -machine q35 \
+        -cpu max \
+        -smp ${CPU_CORES} \
+        -boot menu=off \
+        -m ${MEMORY_SIZE} \
+        -vga virtio \
+        -display gtk,gl=on \
+        -nic user,hostfwd=tcp::${NETWORK_PORT}-:22 \
+        -device intel-hda \
+        -device hda-duplex \
+        -device nec-usb-xhci,id=usb-bus \
+        -device usb-tablet,bus=usb-bus.0 \
+        -device usb-mouse,bus=usb-bus.0 \
+        -device usb-kbd,bus=usb-bus.0 \
+        -kernel "${KERNEL_PATH}" \
+        -append "root=/dev/vda2 ip=dhcp" \
+        -drive file="${ROOTFS_PATH}",if=virtio,format=qcow2
+      EOF
+
+    - chmod +x run_qemu.sh
+    - ./run_qemu.sh &
+
+    - echo "Waiting for QEMU to start..."
+    - sleep 90
+
+    - echo "Step 18 = Verifying SSH connection to QEMU"
+    - ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} -p ${SSH_PORT} "uname -a"
+    ## && timeout 5s systemctl status ui3" ##&& timeout 5s systemctl status softwarecontainer-agent"
+
+    - echo "Step 19 = Ensuring 'results/' directory exists"
+    - mkdir -p results 
+
+    - echo "Step 19.1 = Taking screenshot after QEMU boot"
+    - xwd -root -display :99 -silent | convert xwd:- results/qemu_screenshot_initial.png  # Takes screenshot after QEMU starts
+    - jf rt u "results/*" "${ARTIFACTORY_UPLOAD_URL}" --flat=false
+
+    - echo "Step 19.2 = Setting PYTHONPATH"
+    - export PYTHONPATH=$PYTHONPATH:/builds/mbient/adk_manifests/qemu-9.1.0/verification-robotframework/TestKeywords:/builds/mbient/adk_manifests/qemu-9.1.0/verification-robotframework/MbTest/Lib/Utils
+
+    - echo "Step 19.3 = Installing Python dependencies"
+    - pip install robotframework robotframework-jira robotframework-sshlibrary || exit 1
+
+    - echo "Step 19.4 = Debugging TestKeywords directory"
+    - ls -R /builds/mbient/adk_manifests/qemu-9.1.0/verification-robotframework/TestKeywords/ADK
+
+    - echo "Step 20 = Running Robot Framework tests"
+    - cd ../../../../../../../../../
+    - mkdir -p TestSuites/BasicFeature/ADK/results
+    - cd TestSuites/BasicFeature/ADK
+    - pwd
+    - export PYTHONPATH=$PYTHONPATH:/builds/mbient/adk_manifests/qemu-9.1.0/verification-robotframework/TestKeywords/:/builds/mbient/adk_manifests/qemu-9.1.0/verification-robotframework/MbTest/Lib/Utils/
+    - robot --outputdir results adk.robot || true
+
+
+    - echo "Step 21 = Taking screenshot after tests"
+    - xwd -root -display :99 -silent | convert xwd:- results/qemu_screenshot_after_tests.png  # Takes screenshot after tests complete
+    - jf rt u "results/*" "${ARTIFACTORY_UPLOAD_URL}" --flat=false
+
+    - echo "Step 22 = Uploading test results and screenshots to Artifactory"
+    - jf rt u "results/*" "${ARTIFACTORY_UPLOAD_URL}" --flat=false
+
+  artifacts:
+    paths:
+      - results/  
+      - qemu-9.1.0/verification-robotframework/TestSuites/BasicFeature/ADK/results/
+      - qemu-9.1.0/verification-robotframework/Resources/ADK/images/teams/ADK/Qemu/build/unofficial-adk/i3_nightly/qemu_output.log
+    expire_in: 1 week
+
+  rules:
+    - if: $CI_TASK == "Testing"
