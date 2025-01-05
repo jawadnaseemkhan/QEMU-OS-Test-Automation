@@ -1,11 +1,11 @@
-**Repository Name:
-**qemu-adk-test-automation
+**Repository Name:**
+qemu-adk-test-automation
 
-**Repository Description:
-**"Automated Testing Pipeline for QEMU-based ADK Environment using Robot Framework and CI/CD Integration"
+**Repository Description:**
+"Automated Testing Pipeline for QEMU-based ADK Environment using Robot Framework and CI/CD Integration"
 
-**About the Project:
-**This repository contains a comprehensive GitLab CI/CD pipeline configuration for testing an ADK (Application Development Kit) environment within a QEMU virtualized setup. It includes:
+**About the Project:**
+This repository contains a comprehensive GitLab CI/CD pipeline configuration for testing an ADK (Application Development Kit) environment within a QEMU virtualized setup. It includes:
 
 **Automated Environment Setup**: Dependencies, QEMU installation, and virtual display (Xvfb).
 **Artifact Management**: Integration with JFrog Artifactory for downloading and uploading test assets.
